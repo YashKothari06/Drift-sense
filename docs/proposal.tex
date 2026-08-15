@@ -1,0 +1,337 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{float}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible
+}
+
+\title{\textbf{Drift-Sense: AI-Powered Navigation-Error Recovery\\ for Wafer Inspection Tools}\\
+\large Semicon India Hackathon --- Applied Materials Problem Statement\\
+\large Final Proposal, Round 1}
+\author{Yash Kothari \\ BITS Pilani, Electronics}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We address the Drift-Sense problem: given a high-resolution (100x) reference
+image of a previously characterized wafer site and a lower-resolution (10x)
+wide-search image, locate the reference pattern's center inside the search
+image to sub-pixel precision, despite the pattern's periodicity making the
+search a genuine needle-in-a-haystack problem. We present (1) a
+literature-grounded synthetic DRAM/FinFET dataset generator with a
+physically motivated SEM noise model, (2) a classical FFT-based matched-
+filtering localizer achieving sub-pixel accuracy at real-time speed, (3) a
+novel \emph{prior-window} search restriction --- motivated by how real
+navigation-error-recovery systems work and confirmed against wafer-alignment
+patent literature --- that resolves periodic-array ambiguity with no
+accuracy/speed trade-off, (4) an honest deliberately-adversarial failure
+case for explainability, and (5) a from-scratch DL (Siamese CNN) ablation
+compared fairly against the classical method. We report all metrics the
+rubric requests: single-image compute time, success rate over 30+
+randomized cases, and a documented failure mode.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Problem Reframing}
+% ============================================================
+
+The problem is titled ``navigation-error recovery,'' not ``template
+matching.'' We treat this distinction as central to the design: a
+vision-only submission returns a coordinate; a \emph{recovery} system
+returns a coordinate \emph{and} exploits what the tool already knows about
+its own motion. Specifically, the tool commanded the stage to a known
+target coordinate; drift is a small, physically bounded error around that
+commanded position, not an arbitrary location anywhere in the $10\,\mu
+\text{m} \times 10\,\mu\text{m}$ search field. This observation motivates
+our single most impactful design decision (Section~\ref{sec:prior}).
+
+% ============================================================
+\section{Synthetic Dataset Generator}
+% ============================================================
+
+\subsection{Structure rendering}
+
+We generate DRAM-style (word-line / bit-line / storage-node contact array)
+and FinFET-style (parallel fin / gate-line array) patterns parametrically,
+at both the reference resolution (1\,nm/px, $1000\times1000$, $1\,\mu
+\text{m}$ field of view) and the search resolution (10\,nm/px,
+$1000\times1000$, $10\,\mu\text{m}$ field of view), reusing the same
+renderer at scaled pitch/width/radius parameters for the two zoom levels.
+
+Every line and contact edge receives \emph{line-edge roughness} (LER): a
+smoothed random perturbation of the nominal edge position, rather than a
+geometrically perfect edge. This is standard in CD-SEM metrology
+literature (Section~\ref{sec:citations}) and is what makes independently
+rendered ``identical'' repeat units visually similar but not pixel-
+identical --- the source of the problem's genuine periodic-array ambiguity.
+
+\subsection{Noise model}
+
+After clean-pattern rendering, we apply, independently to the reference
+and search images:
+\begin{itemize}
+  \item \textbf{Poisson (shot) noise} --- signal-dependent, dominant term
+    in real SEM images (electron-count-limited signal).
+  \item \textbf{Gaussian read/amplifier noise} --- additive,
+    signal-independent.
+  \item \textbf{Beam-spot PSF blur} --- Gaussian blur.
+  \item \textbf{Scan-line jitter} --- independent per-row intensity offset
+    modeling raster-scan instability.
+\end{itemize}
+Per the problem FAQ, the search image is deliberately noisier than the
+reference (lower photon gain, larger blur, larger scan-line jitter),
+modeling a faster/less careful survey scan versus a careful
+characterization scan.
+
+\subsection{Bonus: optical-microscope (RGB) generalization}
+
+We additionally generate 3-channel optical-microscope-style images:
+per-channel diffraction-limited PSF blur, an independent sub-pixel
+\emph{chromatic-aberration} shift per R/G/B channel (implemented as a
+Fourier phase shift to avoid interpolation artifacts), and per-channel
+Poisson/Gaussian sensor noise. Localization reuses the identical
+classical pipeline via a standard ITU-R BT.601 luminance conversion ---
+no separate algorithm is needed for the bonus case.
+
+% ============================================================
+\section{Classical Localization Algorithm}
+% ============================================================
+
+\subsection{Matched filtering via FFT}
+
+Because the zoom ratio between reference and search is known
+\emph{exactly} (10x, given by the problem), we do not need scale-invariant
+features (SIFT/ORB); that would be solving a strictly harder problem than
+the one posed. Instead:
+\begin{enumerate}
+  \item Downsample the reference by the known zoom ratio.
+  \item Cross-correlate the downsampled template against the full search
+    image via FFT (matched filtering, $O(N\log N)$ rather than a
+    brute-force sliding window).
+  \item Normalize using zero-mean template statistics and local
+    search-window statistics via integral images (the ``sum tables''
+    trick of Lewis, 1995), giving illumination/contrast-invariant
+    Normalized Cross-Correlation (NCC).
+  \item Refine the peak to sub-pixel precision via parabolic
+    interpolation.
+\end{enumerate}
+
+\subsection{Global Ambiguity Ratio (a corrected metric)}
+\label{sec:gar}
+
+We initially borrowed the \emph{Peak-to-Sidelobe Ratio} (PSR) from
+correlation-filter object tracking (the MOSSE tracker; Bolme et al.,
+CVPR 2010) as a confidence score. Empirically, PSR failed to detect
+periodic-array ambiguity: it is computed from a \emph{local} window around
+the chosen peak, but a look-alike decoy site can sit anywhere in the
+image, far outside any local window. Tuning the window size did not fix
+this --- it is the wrong scope of metric for this failure mode.
+
+We replaced it with a \textbf{Global Ambiguity Ratio (GAR)}: the ratio of
+the second-best non-local correlation peak to the best peak, in the style
+of Lowe's ratio test in SIFT. This separates cleanly on our data: easy
+(non-adversarial) cases score GAR $\approx 0.88$--$0.91$; genuinely
+ambiguous (decoy-embedded) cases score GAR $\approx 0.98$--$0.999$. We
+retain local PSR as a secondary ``peak sharpness'' diagnostic, with its
+scope limitation documented explicitly rather than silently mis-applied.
+
+\subsection{Prior-window search restriction}
+\label{sec:prior}
+
+Motivated by the reframing in Section~1, and confirmed against real
+industry practice (US Patent 7,545,497, ``Alignment routine for optically
+based tools,'' which explicitly restricts search to a local area around
+an expected point using known periodicity, rather than searching the full
+field blind; see also coarse-to-fine tracking and die-bonding literature
+in Section~\ref{sec:citations}), we add an optional prior: given an
+expected/commanded coordinate and a maximum bounded drift radius,
+candidates outside that window are discarded \emph{before} scoring.
+
+This is not a trade-off. It is simultaneously faster (smaller effective
+candidate pool) and more robust to distant periodic decoys, with
+\emph{zero} loss of sub-pixel precision, since the identical FFT-NCC and
+parabolic refinement run unchanged inside the window.
+
+% ============================================================
+\section{Results}
+% ============================================================
+
+\subsection{Classical pipeline}
+
+\begin{table}[H]
+\centering
+\caption{Classical FFT-NCC, 30 randomized cases, 3\,px (30\,nm) tolerance.}
+\begin{tabular}{lccc}
+\toprule
+Configuration & Success rate & Mean / median error & Mean compute time \\
+\midrule
+Non-adversarial (``easy'') & 100\% (30/30) & 0.03\,px / 0.03\,px & 309\,ms \\
+Adversarial decoy (``hard''), no prior & 46.7\% (14/30) & 194.9\,px / 155.9\,px & 224\,ms \\
+Adversarial decoy (``hard''), with prior & \textbf{100\% (30/30)} & \textbf{0.02\,px / 0.02\,px} & \textbf{215\,ms} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Single-image ($1000\times1000$) compute time: \textbf{$\sim$200--300\,ms},
+well within interactive/inline-metrology budgets.
+
+\subsection{Honest failure case (explainability)}
+
+Figure~\ref{fig:failure} shows the worst failure under adversarial
+decoy testing without the prior window (seed 24; error 753\,px). The true
+site scored 0.8464 vs.\ the decoy's 0.8438 --- a 0.3\% relative gap. The
+algorithm followed its own specified tie-break rule (closest to the
+search image's geometric center, per the problem statement's own
+disambiguation instruction) and selected the decoy because it happened to
+sit closer to center. \textbf{This is not a bug}: it is an inherent
+limitation of a purely image-content-based tie-break when two sites are
+genuinely, structurally indistinguishable --- precisely the case the
+prior-window mechanism in Section~\ref{sec:prior} is designed to resolve
+using information outside the image alone.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.6\textwidth]{failure_case_seed24.png}
+\caption{Annotated failure case. Green: true site. Yellow: embedded
+decoy (structurally identical pattern). Red: algorithm's prediction
+(landed on the decoy). Both sites are visually indistinguishable from
+the periodic background at this zoom.}
+\label{fig:failure}
+\end{figure}
+
+\subsection{DL (Siamese CNN) ablation}
+
+We trained a small (69k-parameter) fully-convolutional Siamese embedding
+network from scratch on our own synthetic generator (no external/
+pretrained weights: consistent with the problem's no-external-dataset
+constraint, and this sandbox cannot reach pretrained-model hosts such as
+torch.hub or Hugging Face regardless). Table~\ref{tab:dl} compares
+configurations on 30 adversarial cases at 3\,px tolerance.
+
+\begin{table}[H]
+\centering
+\caption{DL (Siamese CNN) ablation, 30 adversarial cases, 3\,px tolerance.}
+\label{tab:dl}
+\begin{tabular}{lccc}
+\toprule
+Configuration & Success rate & Mean / median error & Mean compute time \\
+\midrule
+Raw DL argmax & 6.7\% & 73.6\,px / 60.2\,px & 4.4\,ms \\
+DL + local NCC refinement & 50.0\% & 66.1\,px / 34.8\,px & 7.1\,ms \\
+DL + refinement + prior window & 86--90\% & $\sim$5--8\,px / 0.07\,px & 10--49\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Interpretation.} The raw network's 16x-downsampled feature grid
+caps its native localization precision at $\sim$16\,px; a small local
+classical-NCC refinement step recovers sub-pixel precision on correctly
+identified sites without materially affecting speed. Decoy confusion,
+however, is a separate failure mode from precision and is resolved the
+same way as in the classical pipeline: via the prior window, not by
+better features alone. We observed run-to-run variation in the DL
+numbers (e.g., 86.7\% vs.\ 90.0\% success across two runs with the same
+seed) attributable to floating-point non-determinism in neural-network
+training across CPU/BLAS configurations --- the classical pipeline, being
+deterministic FFT arithmetic, does not exhibit this variance, which we
+consider a point in its favor for reproducibility.
+
+\textbf{Recommendation.} We submit the classical FFT-NCC \(+\) prior-window
+pipeline as our primary method (100\% success, sub-pixel accuracy,
+deterministic, $\sim$215\,ms) and present the DL ablation as a documented,
+honest trade-off study rather than a competing primary submission: DL is
+$\sim$4--20x faster per inference but has not yet been trained, in the
+compute budget available, to match classical accuracy.
+
+% ============================================================
+\section{Literature Justification}
+\label{sec:citations}
+% ============================================================
+
+Every noise/augmentation/algorithmic choice above is grounded against
+public sources (paraphrased, not quoted); the full annotated bibliography
+with URLs is provided in the accompanying \texttt{citations.md}. Summary:
+
+\begin{table}[H]
+\centering
+\caption{Design choice $\to$ literature category mapping.}
+\begin{tabular}{p{5.2cm}p{9.3cm}}
+\toprule
+Design choice & Source category \\
+\midrule
+Poisson-Gaussian SEM noise model &
+  Avci et al. (SEM shot-noise estimation); ScienceDirect M-Denoiser
+  (2023); Oxford Academic SEM noise classification (2025) \\
+Line-edge roughness (LER/LWR) &
+  Bunday/Bishop/Villarrubia/Vlädar (NIST/SEMATECH CD-SEM LER metrology);
+  ITRS roughness targets ($<$1.7\,nm sub-20\,nm nodes) \\
+FinFET pitch/width parameters &
+  IEEE, ``Scaling of SOI FinFETs down to 4\,nm fin width for the 10\,nm
+  node'' (fin pitch 40\,nm, gate length 20\,nm) \\
+Optical chromatic aberration / PSF &
+  Nikon MicroscopyU diffraction-barrier article; Wadsworth Center
+  microscopy glossary \\
+Fast NCC via FFT + integral images &
+  Lewis, ``Fast Normalized Cross-Correlation,'' Vision Interface, 1995 \\
+Peak-to-Sidelobe Ratio &
+  Bolme, Beveridge, Draper, Lui, ``Visual Object Tracking Using
+  Adaptive Correlation Filters'' (MOSSE), CVPR 2010 \\
+Prior-window search restriction &
+  US Patent 7,545,497; coarse-to-fine tracking (arXiv 2012.12784);
+  die-bonding rough-then-fine positioning patent (US 12,327,739) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{Deliverables (per submission FAQ)}
+% ============================================================
+
+\begin{itemize}
+  \item \texttt{generate\_dataset.py} --- dataset generator, documented
+    noise model, DRAM/FinFET/RGB modes.
+  \item \texttt{localize.py} --- classical FFT-NCC localizer, GAR/PSR
+    diagnostics, prior-window support.
+  \item \texttt{evaluate.py} --- 30+-case batch evaluation harness with
+    live progress reporting.
+  \item \texttt{dl\_localize.py} --- DL (Siamese CNN) training and
+    evaluation, including prior-window and refinement support.
+  \item \texttt{citations.md} --- full annotated bibliography.
+  \item \texttt{requirements.txt} --- exact environment (\texttt{pip
+    freeze}) for reproducibility.
+\end{itemize}
+
+% ============================================================
+\section{Round 2 Development Plan}
+% ============================================================
+
+If selected, we plan to: (1) extend DL training to the full $1000\times
+1000$ scale with a longer/GPU-accelerated training budget, since our
+current CPU-only run did not converge at that resolution within available
+compute; (2) fuse the prior window with an explicit stage-drift model
+(Ornstein--Uhlenbeck / random-walk process) so the expected coordinate and
+its uncertainty radius are predicted rather than assumed; (3) extend the
+FinFET generator's literature grounding with additional pitch-scaling
+sources per technology node; (4) stress-test the prior-window mechanism
+under larger/unknown drift magnitudes to characterize its own failure
+boundary, in the same explainability spirit as Section~4.2.
+
+\end{document}
