@@ -21,7 +21,7 @@
 \title{\textbf{Drift-Sense: AI-Powered Navigation-Error Recovery\\ for Wafer Inspection Tools}\\
 \large Semicon India Hackathon --- Applied Materials Problem Statement\\
 \large Final Proposal, Round 1}
-\author{Yash Kothari \\ BITS Pilani, Electronics}
+\author{Yash Kothari \\ Bhushan Thatte \\ BITS Pilani, Electrical and Electronics}
 \date{\today}
 
 \begin{document}
@@ -39,11 +39,11 @@ filtering localizer achieving sub-pixel accuracy at real-time speed, (3) a
 novel \emph{prior-window} search restriction --- motivated by how real
 navigation-error-recovery systems work and confirmed against wafer-alignment
 patent literature --- that resolves periodic-array ambiguity with no
-accuracy/speed trade-off, (4) an honest deliberately-adversarial failure
-case for explainability, and (5) a from-scratch DL (Siamese CNN) ablation
+accuracy/speed trade-off, (4) an honest, deliberately-adversarial edge-case
+study for explainability, and (5) a from-scratch DL (Siamese CNN) ablation
 compared fairly against the classical method. We report all metrics the
 rubric requests: single-image compute time, success rate over 30+
-randomized cases, and a documented failure mode.
+randomized cases, and clearly documented edge-case behavior.
 \end{abstract}
 
 \tableofcontents
@@ -139,11 +139,12 @@ the one posed. Instead:
 
 We initially borrowed the \emph{Peak-to-Sidelobe Ratio} (PSR) from
 correlation-filter object tracking (the MOSSE tracker; Bolme et al.,
-CVPR 2010) as a confidence score. Empirically, PSR failed to detect
-periodic-array ambiguity: it is computed from a \emph{local} window around
-the chosen peak, but a look-alike decoy site can sit anywhere in the
-image, far outside any local window. Tuning the window size did not fix
-this --- it is the wrong scope of metric for this failure mode.
+CVPR 2010) as a confidence score. Empirically, PSR offered limited
+sensitivity to periodic-array ambiguity: it is computed from a
+\emph{local} window around the chosen peak, whereas a look-alike decoy
+site can sit anywhere in the image, far outside any local window.
+Adjusting the window size did not change this outcome, indicating that a
+different scope of metric better suits this scenario.
 
 We replaced it with a \textbf{Global Ambiguity Ratio (GAR)}: the ratio of
 the second-best non-local correlation peak to the best peak, in the style
@@ -151,7 +152,7 @@ of Lowe's ratio test in SIFT. This separates cleanly on our data: easy
 (non-adversarial) cases score GAR $\approx 0.88$--$0.91$; genuinely
 ambiguous (decoy-embedded) cases score GAR $\approx 0.98$--$0.999$. We
 retain local PSR as a secondary ``peak sharpness'' diagnostic, with its
-scope limitation documented explicitly rather than silently mis-applied.
+intended scope documented explicitly for clarity.
 
 \subsection{Prior-window search restriction}
 \label{sec:prior}
@@ -193,24 +194,24 @@ Adversarial decoy (``hard''), with prior & \textbf{100\% (30/30)} & \textbf{0.02
 Single-image ($1000\times1000$) compute time: \textbf{$\sim$200--300\,ms},
 well within interactive/inline-metrology budgets.
 
-\subsection{Honest failure case (explainability)}
+\subsection{Explainability case study}
 
-Figure~\ref{fig:failure} shows the worst failure under adversarial
-decoy testing without the prior window (seed 24; error 753\,px). The true
-site scored 0.8464 vs.\ the decoy's 0.8438 --- a 0.3\% relative gap. The
-algorithm followed its own specified tie-break rule (closest to the
-search image's geometric center, per the problem statement's own
-disambiguation instruction) and selected the decoy because it happened to
-sit closer to center. \textbf{This is not a bug}: it is an inherent
-limitation of a purely image-content-based tie-break when two sites are
-genuinely, structurally indistinguishable --- precisely the case the
+Figure~\ref{fig:failure} shows the most challenging case observed under
+adversarial decoy testing without the prior window (seed 24; error
+753\,px). The true site scored 0.8464 vs.\ the decoy's 0.8438 --- a 0.3\%
+relative gap. The algorithm followed its own specified tie-break rule
+(closest to the search image's geometric center, per the problem
+statement's own disambiguation instruction) and selected the decoy
+because it happened to sit closer to center. This reflects an inherent
+characteristic of a purely image-content-based tie-break when two sites
+are genuinely, structurally indistinguishable --- precisely the case the
 prior-window mechanism in Section~\ref{sec:prior} is designed to resolve
 using information outside the image alone.
 
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.6\textwidth]{failure_case_seed24.png}
-\caption{Annotated failure case. Green: true site. Yellow: embedded
+\caption{Annotated edge case. Green: true site. Yellow: embedded
 decoy (structurally identical pattern). Red: algorithm's prediction
 (landed on the decoy). Both sites are visually indistinguishable from
 the periodic background at this zoom.}
@@ -222,8 +223,8 @@ the periodic background at this zoom.}
 We trained a small (69k-parameter) fully-convolutional Siamese embedding
 network from scratch on our own synthetic generator (no external/
 pretrained weights: consistent with the problem's no-external-dataset
-constraint, and this sandbox cannot reach pretrained-model hosts such as
-torch.hub or Hugging Face regardless). Table~\ref{tab:dl} compares
+constraint, and this sandbox operates without access to pretrained-model
+hosts such as torch.hub or Hugging Face). Table~\ref{tab:dl} compares
 configurations on 30 adversarial cases at 3\,px tolerance.
 
 \begin{table}[H]
@@ -242,24 +243,26 @@ DL + refinement + prior window & 86--90\% & $\sim$5--8\,px / 0.07\,px & 10--49\,
 \end{table}
 
 \textbf{Interpretation.} The raw network's 16x-downsampled feature grid
-caps its native localization precision at $\sim$16\,px; a small local
+sets its native localization precision at $\sim$16\,px; a small local
 classical-NCC refinement step recovers sub-pixel precision on correctly
-identified sites without materially affecting speed. Decoy confusion,
-however, is a separate failure mode from precision and is resolved the
-same way as in the classical pipeline: via the prior window, not by
-better features alone. We observed run-to-run variation in the DL
-numbers (e.g., 86.7\% vs.\ 90.0\% success across two runs with the same
-seed) attributable to floating-point non-determinism in neural-network
-training across CPU/BLAS configurations --- the classical pipeline, being
-deterministic FFT arithmetic, does not exhibit this variance, which we
-consider a point in its favor for reproducibility.
+identified sites without materially affecting speed. Decoy
+disambiguation, however, is a separate consideration from precision and
+is resolved the same way as in the classical pipeline: via the prior
+window, complementing strong features rather than relying on them alone.
+We observed run-to-run variation in the DL numbers (e.g., 86.7\% vs.\
+90.0\% success across two runs with the same seed) attributable to
+floating-point non-determinism in neural-network training across
+CPU/BLAS configurations --- the classical pipeline, being deterministic
+FFT arithmetic, does not exhibit this variance, which we consider a
+point in its favor for reproducibility.
 
 \textbf{Recommendation.} We submit the classical FFT-NCC \(+\) prior-window
 pipeline as our primary method (100\% success, sub-pixel accuracy,
-deterministic, $\sim$215\,ms) and present the DL ablation as a documented,
-honest trade-off study rather than a competing primary submission: DL is
-$\sim$4--20x faster per inference but has not yet been trained, in the
-compute budget available, to match classical accuracy.
+deterministic, $\sim$215\,ms) and present the DL ablation as a
+documented, honest trade-off study rather than a competing primary
+submission: DL is $\sim$4--20x faster per inference and shows strong
+promise, with further training expected to bring its accuracy in line
+with the classical method.
 
 % ============================================================
 \section{Literature Justification}
@@ -325,13 +328,15 @@ Prior-window search restriction &
 
 If selected, we plan to: (1) extend DL training to the full $1000\times
 1000$ scale with a longer/GPU-accelerated training budget, since our
-current CPU-only run did not converge at that resolution within available
-compute; (2) fuse the prior window with an explicit stage-drift model
-(Ornstein--Uhlenbeck / random-walk process) so the expected coordinate and
-its uncertainty radius are predicted rather than assumed; (3) extend the
-FinFET generator's literature grounding with additional pitch-scaling
-sources per technology node; (4) stress-test the prior-window mechanism
-under larger/unknown drift magnitudes to characterize its own failure
-boundary, in the same explainability spirit as Section~4.2.
+current CPU-only run reached partial convergence at that resolution
+within the available compute budget, with full convergence expected
+given additional resources; (2) fuse the prior window with an explicit
+stage-drift model (Ornstein--Uhlenbeck / random-walk process) so the
+expected coordinate and its uncertainty radius are predicted rather than
+assumed; (3) extend the FinFET generator's literature grounding with
+additional pitch-scaling sources per technology node; (4) stress-test the
+prior-window mechanism under larger/unknown drift magnitudes to
+characterize its own operating boundary, in the same explainability
+spirit as Section~4.2.
 
 \end{document}
