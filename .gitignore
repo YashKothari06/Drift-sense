@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+*.Zone.Identifier
+data/
+data_*/
+calib_*/
+OneDrive_*/
+*.pt
+!sample_outputs/*.pt
