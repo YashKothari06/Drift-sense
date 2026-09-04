@@ -1,2 +1,4 @@
-opencv-python
-opencv-python
+numpy>=2.0
+scipy>=1.11
+opencv-python-headless>=4.9
+Pillow>=10.0
