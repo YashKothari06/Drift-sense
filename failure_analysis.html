@@ -1,0 +1,76 @@
+<html><head><style>
+body { font-family: sans-serif; font-size: 8.5pt; margin: 18px; line-height: 1.25; }
+h1 { font-size: 12pt; margin-bottom: 4px; }
+h2 { font-size: 10pt; margin-top: 8px; margin-bottom: 3px; }
+p { margin: 3px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 7.5pt; }
+td, th { border: 1px solid #999; padding: 2px 4px; }
+</style></head><body><h1>Drift-Sense Phase 2 — Failure Analysis</h1>
+<p><strong>Team:</strong> Yash Kothari, BITS Pilani | <strong>Problem:</strong> Applied Materials Drift-Sense</p>
+<hr />
+<h2>1. Hand-Rolled FFT-NCC Bug (Root Cause of Phase 1 Accuracy Failures)</h2>
+<p><strong>What failed:</strong> The original <code>normalized_cross_correlation_fft</code> (integral image + FFT) had a genuine implementation bug. At the exact ground-truth (scale, theta), it returned wrong locations (18–358px error, score 0.66–0.82) while <code>cv2.matchTemplate</code> on the same inputs returned correct locations (0.3–0.7px error, score 0.85–0.87).</p>
+<p><strong>Evidence:</strong> Direct A/B comparison on real organizer sample pairs at known ground-truth pose. The hand-rolled implementation's score surface had systematic phase errors — it was not computing normalized cross-correlation correctly despite appearing to produce plausible-looking scores.</p>
+<p><strong>Fix:</strong> Replaced the core correlation primitive entirely with <code>cv2.matchTemplate(TM_CCOEFF_NORMED)</code>. All beam-search and GAR logic retained on top. Result: Set A=1.000, Set B=0.967, Set D=1.000, F1=1.000 vs organizer baseline A=1.000, B=0.467, D=1.000, F1=0.897.</p>
+<hr />
+<h2>2. Scale-Step Quantization Error</h2>
+<p><strong>What failed:</strong> Stage 1 coarse grid used <code>scale_step=1.0</code> (grid: 8,9,10,11,12). For a true scale of e.g. 10.55, the nearest grid point is 11.0 — a 0.45 mismatch. At this off-scale template, the true embedded position's NCC score degraded enough that an unrelated structural region elsewhere in the search image scored higher by a clear margin. The beam search then refined the wrong branch confidently, producing 81px and 226px localization errors at high confidence (score≈0.85, GAR≈0.98).</p>
+<p><strong>Evidence:</strong> At exact true scale (10.55), the true position scored 0.8326 and won outright. At scale=11.0 (nearest grid), it scored only 0.5621 while an unrelated location scored 0.5875 — a real, not noise-level gap. Stage 2 theta refinement made it worse: score monotonically increased as theta moved <em>away</em> from true value (-2.3°→-1.0°), because the wrong location's match landscape was smoother and more favorable at integer scale.</p>
+<p><strong>Fix:</strong> Changed <code>scale_step=1.0</code> → <code>scale_step=0.5</code>. Stage 1 evaluations increased from 25 to 45 (9 scale × 5 theta anchors). Max scale quantization error reduced from 0.5 to 0.25. Timing impact: ~0.3s additional, negligible vs 17.5s budget. All seeds corrected to sub-1px error.</p>
+<hr />
+<h2>3. Absent-Pair Generator Design Flaw</h2>
+<p><strong>What failed:</strong> <code>generate_dataset_v2.py</code>'s absent-pair branch embedded a same-pitch, same-architecture distractor patch into the search image, while leaving the reference as the true original template. This caused 100% false positive rate on locally-generated Set C: scores 0.62–0.85, all well above rejection threshold.</p>
+<p><strong>Root cause:</strong> Two renders of the same periodic pattern (same pitch, same architecture, different RNG seed) still correlate strongly under NCC — matchTemplate has 3 degrees of freedom (x, y, and scale/theta already fixed in stage3) to find the best phase alignment between two periodic grids. A sharp, confident false lock (score=0.70, GAR=0.33) resulted, not diffuse aliasing.</p>
+<p><strong>Organizer's actual method</strong> (confirmed from <code>phase2_pipeline.py</code> lines 380–413): search canvas left completely untouched; reference swapped for a decoy from an <em>independent</em> canvas with <code>mat_size×0.55</code>, <code>strip_width×2.1</code> — deliberately mismatched periodicity that structurally cannot occur anywhere in the true search image. Decoy also force-cropped onto a mat/strip junction for additional structural specificity.</p>
+<p><strong>Fix:</strong> Rewrote absent branch to mirror organizer exactly: <code>search_clean</code> left untouched, <code>ref_clean</code> replaced with decoy rendered at <code>pitch×0.55</code>, <code>line_width×2.1</code>, <code>contact_r×1.6</code>. Result: false positive rate 20/20→0/20, absent scores now 0.12–0.33, matching real organizer absent range (0.26–0.40).</p>
+<hr />
+<h2>4. Threshold Calibration — Borderline Case</h2>
+<p><strong>What failed:</strong> Original thresholds <code>(score≥0.42 OR gar≤0.60)</code> produced 1 false positive on real organizer data: p018 (absent, Set C severity=0) scored 0.4291 — just 0.009 above threshold. The score gap between the closest present pair (p012, score=0.4292) and p018 was 0.0001 — numerically indistinguishable by score alone.</p>
+<p><strong>Resolution:</strong> GAR provides real separation: p012 GAR=0.6227 (confident, low ambiguity — true match), p018 GAR=0.7527 (more ambiguous — no true correspondence). GAR gap = 0.13, a meaningful margin. Changed thresholds to <code>(score≥0.43 OR gar≤0.65)</code>: both p012 and p018 now fail the score branch, but p012 passes the GAR branch (0.6227≤0.65) while p018 does not (0.7527&gt;0.65). F1=1.000 with real margin on both axes.</p>
+<hr />
+<h2>5. Remaining Limitations</h2>
+<p>Local generator's search background shares pitch/architecture with the reference, causing occasional false locks (1/20) not seen on real data (GAR 0.45–0.86 real vs 0.98+ synthetic) — all thresholds calibrated on the real 20-pair set, not local data. Rejection margin is thin with only 4 real absent samples (p018=0.4291 vs hardest present p012=0.4292); GAR (0.13 gap) resolves it, but the real 200-pair set may include harder decoys per the organizer README, warranting re-check if more absent samples become available. Set D (RGB) handled via grayscale conversion; both pairs localized correctly (err&lt;0.32px) but no dedicated multi-channel logic implemented.</p>
+<hr />
+<h2>6. Summary Table</h2>
+<table>
+<thead>
+<tr>
+<th>Issue</th>
+<th>Impact</th>
+<th>Fix</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FFT-NCC bug</td>
+<td>Wrong location on all pairs</td>
+<td>cv2.matchTemplate</td>
+<td>Fixed</td>
+</tr>
+<tr>
+<td>scale_step=1.0</td>
+<td>81–226px errors, ~10% pairs</td>
+<td>scale_step=0.5</td>
+<td>Fixed</td>
+</tr>
+<tr>
+<td>Absent-pair generator</td>
+<td>100% false positive on local Set C</td>
+<td>Mismatched-periodicity decoy</td>
+<td>Fixed</td>
+</tr>
+<tr>
+<td>Threshold calibration</td>
+<td>1 FP on real data (p018)</td>
+<td>score≥0.43, gar≤0.65</td>
+<td>Fixed</td>
+</tr>
+<tr>
+<td>Background self-similarity</td>
+<td>Occasional local-data false locks</td>
+<td>Generator realism issue; real data unaffected</td>
+<td>Documented</td>
+</tr>
+</tbody>
+</table></body></html>

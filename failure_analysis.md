@@ -45,11 +45,7 @@
 
 ## 5. Remaining Limitations
 
-**Background self-similarity in local generator:** `generate_dataset_v2.py` renders the search background using the same pitch/architecture family as the reference (just different RNG seed and scale). This causes occasional false locks on locally-generated present pairs (1/20 in testing) because the background produces accidental matches stronger than the true embedded position. This is a generator realism issue — confirmed *absent* on real organizer data, where search backgrounds have sufficient structural diversity (GAR consistently 0.45–0.86 on true matches, vs 0.98+ on synthetic false locks). Local calibration data should not be over-trusted for threshold tuning; all final thresholds calibrated on the real 20-pair organizer sample set.
-
-**Thin rejection margin on borderline Set C pairs:** With only 4 real absent pairs available for calibration, and one borderline case (p018, score=0.4291) nearly overlapping with the hardest present pair (p012, score=0.4292), the rejection decision for the most challenging absent pairs depends on GAR as a secondary discriminant. The real 200-pair set may include harder decoys (organizer README explicitly states this) with different score/GAR distributions — the current threshold may need re-evaluation if access to more absent pairs becomes available.
-
-**RGB/optical Set D:** Handled by grayscale conversion (`PIL.Image.convert('L')`). Both Set D pairs localized correctly (err=0.31px, 0.25px). No special multi-channel handling implemented — a dedicated optical flow or RGB-aware correlation could improve robustness on this bonus set.
+Local generator's search background shares pitch/architecture with the reference, causing occasional false locks (1/20) not seen on real data (GAR 0.45–0.86 real vs 0.98+ synthetic) — all thresholds calibrated on the real 20-pair set, not local data. Rejection margin is thin with only 4 real absent samples (p018=0.4291 vs hardest present p012=0.4292); GAR (0.13 gap) resolves it, but the real 200-pair set may include harder decoys per the organizer README, warranting re-check if more absent samples become available. Set D (RGB) handled via grayscale conversion; both pairs localized correctly (err<0.32px) but no dedicated multi-channel logic implemented.
 
 ---
 
